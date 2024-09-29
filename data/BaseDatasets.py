@@ -8,21 +8,24 @@ from torchvision import transforms
 import torch
 import random
 import os
+from data.trans import PhotoMetricDistortion
 
 
 class BASEDATASETS_VOC(Dataset):
-    def __init__(self, data_root, pipeline, resize_shape=[512,512], is_training=True):
+    def __init__(self, data_root, pipeline, resize_shape=[512,512], is_training=True, is_cuda=False, use_PhotoMetricDistortion=False, **cfg):
         self.data_root = data_root
         self.image_root = self.data_root + 'JPEGImages/'
         self.png_root = self.data_root + 'SegmentationClass/'
         self.resize_shape = resize_shape
         self.is_training = is_training
+        self.is_cuda = is_cuda
+        self.use_PhotoMetricDistortion = use_PhotoMetricDistortion
 
         self.image_path_list = glob.glob(self.image_root + '*.jpg')
         self.mask_path_list = glob.glob(self.png_root + '*.png')
         assert len(self.image_path_list) == len(self.mask_path_list), 'The number of images and masks should be the same.'
-        train_txt_path = os.path.join(data_root, 'train.txt')
-        val_txt_path = os.path.join(data_root, 'val.txt')
+        train_txt_path = os.path.join(data_root, cfg['train_txt_name'])
+        val_txt_path = os.path.join(data_root, cfg['val_txt_name'])
         assert os.path.exists(train_txt_path) and os.path.exists(val_txt_path), 'train.txt or val.txt not exists.'
         if self.is_training:
             with open(train_txt_path, 'r') as f:
@@ -34,7 +37,9 @@ class BASEDATASETS_VOC(Dataset):
                 lines = f.read().splitlines()
             self.image_path_list = [os.path.join(self.image_root, line+'.jpg') for line in lines]
             self.mask_path_list = [os.path.join(self.png_root, line+'.png') for line in lines]
-
+        
+        if self.use_PhotoMetricDistortion:
+            self.photometric_trans = PhotoMetricDistortion()
         # self.ann_file = self.data_root + 'ImageSets/Main/trainval.txt'
         # self.classes = ('background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus',
         #                 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike',
@@ -58,11 +63,20 @@ class BASEDATASETS_VOC(Dataset):
         image_path = self.image_path_list[idx]
         mask_path = self.mask_path_list[idx]
 
+        image = cv2.imread(image_path)
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        if self.pipeline is not None:
+            if 'albu' in self.pipeline.__module__:
+                image = self.pipeline(image=image)['image']
+            else:
+                image = self.pipeline(image)
+        if self.use_PhotoMetricDistortion:
+            image = self.photometric_trans.transform(image)
+
         # 打开 PNG 图片
-        image = Image.open(image_path)
         mask = Image.open(mask_path)
         # 获取原始尺寸
-        original_width, original_height = image.size
+        original_width, original_height = mask.size
         base_size = self.resize_shape[0]
         # 计算比例
         if original_width > original_height:
@@ -75,12 +89,11 @@ class BASEDATASETS_VOC(Dataset):
             new_width = int((base_size / original_height) * original_width)
 
         # 按比例缩放
-        resized_image = image.resize((new_width, new_height))
+        resized_image = cv2.resize(image, (new_width, new_height))/255.0
+        resized_image = (resized_image-np.array([0.485, 0.456, 0.406]))/np.array([0.229, 0.224, 0.225])
         resized_mask = mask.resize((new_width, new_height))
 
-        # new_image = Image.new("RGB", (base_size, base_size), (0, 0, 0))
-        # new_mask = Image.new("L", (base_size, base_size), (0))
-        new_image = np.zeros((base_size, base_size, 3), dtype=np.uint8)
+        new_image = np.zeros((base_size, base_size, 3))
         new_mask = np.zeros((base_size, base_size), dtype=np.uint8)
         
         # 计算缩放后图片在新画布上的位置，使其居中
@@ -88,26 +101,34 @@ class BASEDATASETS_VOC(Dataset):
         top_left_y = (base_size - new_height) // 2
 
         # 将缩放后的图片粘贴到黑色画布上
-        # new_image.paste(resized_image, (top_left_x, top_left_y))
-        # new_mask.paste(resized_mask, (top_left_x, top_left_y))
-        new_image[top_left_y:top_left_y+resized_image.size[1], top_left_x:top_left_x+resized_image.size[0]] = np.array(resized_image)
-        new_mask[top_left_y:top_left_y+resized_image.size[1], top_left_x:top_left_x+resized_image.size[0]] = np.array(resized_mask)
-            
-        if self.pipeline is not None:
-            image = self.pipeline(new_image)
+        new_image[top_left_y:top_left_y+new_height, top_left_x:top_left_x+new_width] = np.array(resized_image)
+        new_mask[top_left_y:top_left_y+new_height, top_left_x:top_left_x+new_width] = np.array(resized_mask)
         
-        mask = torch.tensor(np.array(new_mask)).unsqueeze(0).float()
+        image = torch.tensor(np.array(new_image)).permute(2, 0, 1).float()
+        mask = torch.tensor(np.array(new_mask)).unsqueeze(0).long()
+
+        if self.is_cuda:
+            image = image.cuda()
+            mask = mask.cuda()
 
         result_dict = {
             'image': image,
             'mask': mask,
+            'resized_shape': self.resize_shape,
             'original_width': original_width,
-            'original_height': original_height
+            'original_height': original_height,
+            'image_path': image_path,
+            'mask_path': mask_path,
+            'new_h_w': [new_height, new_width],
+            'top_left': [top_left_x, top_left_y]
         }
         
         return result_dict
         # image.palette.colors
-        
+
+class TEST_DATASETS(Dataset):
+    def __init__(self, data_root, pipeline, resize_shape=[512,512], is_cuda=False, **cfg) -> None:
+        super().__init__()
 
 
 if __name__ == '__main__':

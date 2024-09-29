@@ -93,12 +93,15 @@ class ConvNeXt(nn.Module):
             self.stages.append(stage)
             cur += depths[i]
 
-        self.norm = nn.LayerNorm(dims[-1], eps=1e-6) # final norm layer
-        self.head = nn.Linear(dims[-1], num_classes)
+        for i in range(4):
+            self.add_module(f'norm{i}', nn.LayerNorm(dims[i], eps=1e-6))
 
-        self.apply(self._init_weights)
-        self.head.weight.data.mul_(head_init_scale)
-        self.head.bias.data.mul_(head_init_scale)
+        # self.norm = nn.LayerNorm(dims[-1], eps=1e-6) # final norm layer
+        # self.head = nn.Linear(dims[-1], num_classes)
+
+        # self.apply(self._init_weights)
+        # self.head.weight.data.mul_(head_init_scale)
+        # self.head.bias.data.mul_(head_init_scale)
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Conv2d, nn.Linear)):
@@ -116,6 +119,10 @@ class ConvNeXt(nn.Module):
         for i in range(4):
             x = self.downsample_layers[i](x)
             x = self.stages[i](x)
+            norm_layer = getattr(self, f'norm{i}')
+            x = x.permute(0, 2, 3, 1) # (N, C, H, W) -> (N, H, W, C)
+            x = norm_layer(x)
+            x = x.permute(0, 3, 1, 2) # (N, H, W, C) -> (N, C, H, W)
             features.append(x)
 
         return features
@@ -165,7 +172,6 @@ model_urls = {
     "convnext_xlarge_22k": "https://dl.fbaipublicfiles.com/convnext/convnext_xlarge_22k_224.pth",
 }
 
-@register_model
 def convnext_tiny(pretrained=False,in_22k=False, **kwargs):
     model = ConvNeXt(depths=[3, 3, 9, 3], dims=[96, 192, 384, 768], **kwargs)
     if pretrained:
@@ -174,7 +180,6 @@ def convnext_tiny(pretrained=False,in_22k=False, **kwargs):
         model.load_state_dict(checkpoint["model"])
     return model
 
-@register_model
 def convnext_small(pretrained=False,in_22k=False, **kwargs):
     model = ConvNeXt(depths=[3, 3, 27, 3], dims=[96, 192, 384, 768], **kwargs)
     if pretrained:
@@ -183,16 +188,19 @@ def convnext_small(pretrained=False,in_22k=False, **kwargs):
         model.load_state_dict(checkpoint["model"])
     return model
 
-@register_model
 def convnext_base(pretrained=False, in_22k=False, **kwargs):
     model = ConvNeXt(depths=[3, 3, 27, 3], dims=[128, 256, 512, 1024], **kwargs)
     if pretrained:
         url = model_urls['convnext_base_22k'] if in_22k else model_urls['convnext_base_1k']
         checkpoint = torch.hub.load_state_dict_from_url(url=url, map_location="cpu")
-        model.load_state_dict(checkpoint["model"])
+        model_dict = checkpoint["model"]
+        del model_dict["norm.weight"]
+        del model_dict["norm.bias"]
+        del model_dict["head.weight"]
+        del model_dict["head.bias"]
+        model.load_state_dict(model_dict, strict=False)
     return model
 
-@register_model
 def convnext_large(pretrained=False, in_22k=False, **kwargs):
     model = ConvNeXt(depths=[3, 3, 27, 3], dims=[192, 384, 768, 1536], **kwargs)
     if pretrained:
@@ -201,7 +209,6 @@ def convnext_large(pretrained=False, in_22k=False, **kwargs):
         model.load_state_dict(checkpoint["model"])
     return model
 
-@register_model
 def convnext_xlarge(pretrained=False, in_22k=False, **kwargs):
     model = ConvNeXt(depths=[3, 3, 27, 3], dims=[256, 512, 1024, 2048], **kwargs)
     if pretrained:

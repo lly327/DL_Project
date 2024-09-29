@@ -5,7 +5,7 @@ import torch.nn as nn
 # from mmcv.cnn import ConvModule
 import warnings
 import torch.nn.functional as F
-sys.path.append('/Users/lly/codes/DL_Project/')
+# sys.path.append('/Users/lly/codes/DL_Project/')
 from model.backbone.convnext import get_convnext
 
 # from mmseg.registry import MODELS
